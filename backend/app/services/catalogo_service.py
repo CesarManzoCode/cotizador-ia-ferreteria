@@ -1,12 +1,17 @@
 """
 Servicio de importación del catálogo desde Excel.
-Este es uno de los módulos más críticos del sistema.
 
-PUNTOS DE DEBUGGING PRINCIPALES:
-1. Si los encabezados del Excel no se mapean correctamente → ver MAPEO_COLUMNAS
-2. Si los precios vienen como texto con comas → ver _convertir_numero()
-3. Si hay filas de encabezado extra → ver EXCEL_FILA_ENCABEZADO en .env
-4. Si el Excel tiene la hoja en posición distinta → ver EXCEL_HOJA en .env
+PROBLEMA RESUELTO (v3):
+- El Excel es un .xlsm con FÓRMULAS en columnas clave (PRECIO PUBLICO NETO,
+  CODIGO FERROL, DESCRIPCION FERROL, todos los precios por descuento).
+- pandas.read_excel lee fórmulas como strings ('=ROUND(M2,0)') a menos que
+  se use engine='openpyxl' + data_only=True via openpyxl directamente.
+- La hoja correcta es 'PRECIOS', no la primera hoja ('Hoja1' está vacía).
+
+SOLUCIÓN:
+- Leer con openpyxl load_workbook(data_only=True) para obtener valores calculados.
+- Buscar automáticamente la hoja que contenga los encabezados esperados.
+- Normalización robusta de encabezados.
 """
 
 import logging
@@ -15,7 +20,7 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+from openpyxl import load_workbook
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,18 +31,8 @@ from app.models.producto import Producto
 logger = logging.getLogger(__name__)
 
 
-# ── Mapeo de columnas del Excel → campos del modelo ───────────────────────────
-# PUNTO DE DEBUGGING PRINCIPAL:
-# Si tu Excel real tiene nombres diferentes, agrega las variantes aquí.
-# Las claves son variantes posibles del nombre en el Excel.
-# Los valores son el nombre del campo en el modelo Python.
-#
-# El sistema normaliza automáticamente (quita tildes, espacios extra, minúsculas)
-# antes de comparar, por lo que no necesitas agregar variantes de capitalización.
-# Sí necesitas agregar variantes con palabras diferentes.
-
+# ── Mapeo de columnas normalizadas → campos del modelo ────────────────────────
 MAPEO_COLUMNAS: dict[str, str] = {
-    # Columna Excel (normalizada) → campo en modelo Producto
     "producto": "producto",
     "descripcion": "descripcion",
     "descripción": "descripcion",
@@ -55,284 +50,222 @@ MAPEO_COLUMNAS: dict[str, str] = {
     "vigencia": "vigencia",
     "costo + iva": "costo_mas_iva",
     "costo+iva": "costo_mas_iva",
-    "costoiva": "costo_mas_iva",
     "costo mas iva": "costo_mas_iva",
     "iva": "iva",
     "precio sugerido de venta con iva": "precio_sugerido_con_iva",
     "precio sugerido con iva": "precio_sugerido_con_iva",
-    "preciosugeridoconiva": "precio_sugerido_con_iva",
     "codigo sat": "codigo_sat",
     "código sat": "codigo_sat",
-    "codigosat": "codigo_sat",
+    # Con espacio al final (como viene en el Excel real: 'PRECIO PUBLICO NETO ')
     "precio publico neto": "precio_publico_neto",
     "precio público neto": "precio_publico_neto",
-    "preciopublicioneto": "precio_publico_neto",
     "codigo ferrol": "codigo_ferrol",
     "código ferrol": "codigo_ferrol",
-    "codigoferrol": "codigo_ferrol",
     "espacio": "espacio",
     "descripcion ferrol": "descripcion_ferrol",
     "descripción ferrol": "descripcion_ferrol",
-    "descripcionferrol": "descripcion_ferrol",
     "precio 20%": "precio_20",
-    "precio20": "precio_20",
     "precio 8.5%": "precio_85",
-    "precio85": "precio_85",
     "precio 12%": "precio_12",
-    "precio12": "precio_12",
     "precio publico": "precio_publico",
     "precio público": "precio_publico",
-    "preciopublico": "precio_publico",
     "precio publico con 5% descuento": "precio_publico_5_desc",
     "precio público con 5% descuento": "precio_publico_5_desc",
-    "precio publico 5 descuento": "precio_publico_5_desc",
-    "preciopublico5desc": "precio_publico_5_desc",
+}
+
+CAMPOS_NUMERICOS = {
+    "precio_lista", "promocion", "costo_mas_iva", "iva",
+    "precio_sugerido_con_iva", "precio_publico_neto",
+    "precio_20", "precio_85", "precio_12",
+    "precio_publico", "precio_publico_5_desc",
 }
 
 
-def _normalizar_encabezado(texto: str) -> str:
-    """
-    Normaliza un encabezado de columna para comparación robusta.
-    - Convierte a minúsculas
-    - Elimina tildes/acentos
-    - Elimina espacios extra al inicio/fin
-    - Colapsa espacios múltiples a uno solo
-    
-    PUNTO DE DEBUGGING: Si un encabezado no se mapea, agrega un print
-    aquí para ver el valor normalizado y agrégalo a MAPEO_COLUMNAS.
-    """
-    if not isinstance(texto, str):
-        texto = str(texto)
-
-    # Eliminar espacios al inicio y fin
-    texto = texto.strip()
-
-    # Eliminar saltos de línea y tabs
+def _normalizar_encabezado(texto) -> str:
+    """Normaliza un encabezado: minúsculas, sin tildes, sin espacios extra."""
+    if texto is None:
+        return ""
+    texto = str(texto).strip()
     texto = re.sub(r"[\n\r\t]+", " ", texto)
-
-    # Colapsar espacios múltiples
-    texto = re.sub(r"\s+", " ", texto)
-
-    # Convertir a minúsculas
-    texto = texto.lower()
-
-    # Eliminar tildes/acentos usando normalización Unicode NFD
+    texto = re.sub(r"\s+", " ", texto).lower()
     nfkd = unicodedata.normalize("NFKD", texto)
-    texto_sin_tildes = "".join(c for c in nfkd if not unicodedata.combining(c))
-
-    return texto_sin_tildes
-
-
-def _normalizar_texto_busqueda(producto: Producto) -> str:
-    """
-    Genera un texto combinado y normalizado para búsqueda eficiente.
-    Combina producto, descripción, marca y categoría.
-    Este texto se usa en el motor de matching.
-    """
-    partes = []
-
-    for campo in ["producto", "descripcion", "marca", "categoria",
-                  "descripcion_ferrol", "codigo_ferrol"]:
-        valor = getattr(producto, campo, None)
-        if valor and isinstance(valor, str):
-            partes.append(valor.strip())
-
-    texto_completo = " ".join(partes)
-    return _normalizar_encabezado(texto_completo)
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).strip()
 
 
 def _convertir_numero(valor) -> Optional[float]:
-    """
-    Convierte un valor del Excel a float de forma robusta.
-    Maneja: None, strings con comas, strings con $, NaN, etc.
-    
-    PUNTO DE DEBUGGING: Si los precios vienen como texto (ej: "$1,234.56"),
-    esta función los convierte automáticamente. Si fallan, revisa aquí.
-    """
+    """Convierte un valor a float de forma robusta."""
     if valor is None:
         return None
-
     import math
     if isinstance(valor, float) and math.isnan(valor):
         return None
-
     if isinstance(valor, (int, float)):
         return float(valor)
-
     if isinstance(valor, str):
-        # Limpiar símbolos de moneda y espacios
-        limpio = valor.strip()
-        limpio = limpio.replace("$", "").replace(",", "").replace(" ", "")
-
-        # Manejar valores con paréntesis (negativos en contabilidad)
+        limpio = valor.strip().replace("$", "").replace(",", "").replace(" ", "")
         if limpio.startswith("(") and limpio.endswith(")"):
             limpio = "-" + limpio[1:-1]
-
+        # Si empieza con '=' es una fórmula no calculada — ignorar
+        if limpio.startswith("="):
+            return None
         try:
             return float(limpio)
         except ValueError:
             return None
-
     return None
 
 
+def _normalizar_texto_busqueda(producto: Producto) -> str:
+    """Genera texto combinado normalizado para matching."""
+    partes = []
+    for campo in ["producto", "descripcion", "marca", "categoria",
+                  "descripcion_ferrol", "codigo_ferrol"]:
+        valor = getattr(producto, campo, None)
+        if valor and isinstance(valor, str) and not valor.startswith("="):
+            partes.append(valor.strip())
+    return _normalizar_encabezado(" ".join(partes))
+
+
+def _encontrar_hoja_correcta(wb) -> str:
+    """
+    Busca automáticamente la hoja que contenga los encabezados del catálogo.
+    Prioriza la hoja configurada en EXCEL_HOJA; si no, busca la que tenga
+    'Producto' o 'Descripción' en la primera fila.
+    """
+    # Si el usuario configuró una hoja específica, usarla
+    if settings.EXCEL_HOJA and settings.EXCEL_HOJA in wb.sheetnames:
+        logger.info(f"Usando hoja configurada: '{settings.EXCEL_HOJA}'")
+        return settings.EXCEL_HOJA
+
+    # Buscar automáticamente la hoja con encabezados de catálogo
+    palabras_clave = {"producto", "descripcion", "descripción", "marca", "precio"}
+    for nombre in wb.sheetnames:
+        ws = wb[nombre]
+        primera_fila = next(ws.iter_rows(max_row=1, values_only=True), None)
+        if primera_fila:
+            encabezados = {_normalizar_encabezado(v) for v in primera_fila if v}
+            coincidencias = encabezados & palabras_clave
+            if len(coincidencias) >= 2:
+                logger.info(f"Hoja detectada automáticamente: '{nombre}' (coincidencias: {coincidencias})")
+                return nombre
+
+    # Fallback: primera hoja
+    logger.warning(f"No se encontró hoja con encabezados conocidos. Usando primera: '{wb.sheetnames[0]}'")
+    return wb.sheetnames[0]
+
+
 class CatalogoService:
-    """
-    Servicio principal para gestión del catálogo de productos.
-    Importa desde Excel y mantiene los productos en SQLite.
-    """
 
     async def cargar_catalogo_desde_excel(self) -> int:
-        """
-        Lee el Excel configurado en EXCEL_RUTA y carga los productos en SQLite.
-        Limpia y reemplaza los datos existentes en cada carga.
-        
-        Returns:
-            Número de productos cargados exitosamente.
-        
-        Raises:
-            FileNotFoundError: Si el Excel no existe en la ruta configurada.
-            Exception: Si el Excel no puede leerse o no tiene el formato esperado.
-        """
-        ruta_excel = Path(settings.EXCEL_RUTA)
-
-        # Verificar que el archivo existe
-        if not ruta_excel.exists():
+        ruta = Path(settings.EXCEL_RUTA)
+        if not ruta.exists():
             raise FileNotFoundError(
-                f"Excel no encontrado: {ruta_excel.absolute()}\n"
-                f"Configura la ruta correcta en EXCEL_RUTA dentro del archivo .env"
+                f"Excel no encontrado: {ruta.absolute()}\n"
+                f"Configura EXCEL_RUTA en el archivo .env"
             )
 
-        logger.info(f"Leyendo Excel: {ruta_excel.absolute()}")
+        logger.info(f"Leyendo Excel: {ruta.absolute()}")
 
-        # Leer el Excel
-        # PUNTO DE DEBUGGING: Si el Excel tiene múltiples hojas, ajusta EXCEL_HOJA en .env
+        # ── CLAVE: data_only=True para leer valores de fórmulas, no las fórmulas ──
+        # Sin esto, columnas como PRECIO PUBLICO NETO y CODIGO FERROL
+        # vendrían como '=ROUND(M2,0)' y '=CONCATENATE(...)' respectivamente.
         try:
-            hoja = settings.EXCEL_HOJA if settings.EXCEL_HOJA else 0
-            df = pd.read_excel(
-                ruta_excel,
-                sheet_name=hoja,
-                header=settings.EXCEL_FILA_ENCABEZADO,
-                dtype=str,  # Leer todo como string para normalizar manualmente
-                engine="openpyxl",
-            )
+            wb = load_workbook(str(ruta), read_only=True, data_only=True)
         except Exception as e:
-            raise Exception(
-                f"Error al leer el Excel '{ruta_excel}': {e}\n"
-                f"Verifica que el archivo no esté abierto en otro programa."
-            )
+            raise Exception(f"Error al abrir Excel '{ruta}': {e}")
 
-        logger.info(f"Excel leído: {len(df)} filas, {len(df.columns)} columnas.")
-        logger.info(f"Columnas encontradas: {list(df.columns)}")
+        nombre_hoja = _encontrar_hoja_correcta(wb)
+        ws = wb[nombre_hoja]
 
-        # Mapear columnas del Excel a campos del modelo
-        mapeo_aplicado = self._mapear_columnas(df)
-        logger.info(f"Columnas mapeadas: {mapeo_aplicado}")
+        # Leer encabezados de la fila configurada
+        fila_enc = settings.EXCEL_FILA_ENCABEZADO + 1  # openpyxl es 1-indexed
+        encabezados_raw = []
+        for row in ws.iter_rows(min_row=fila_enc, max_row=fila_enc, values_only=True):
+            encabezados_raw = list(row)
+            break
 
-        # Cargar productos en base de datos
-        cantidad = await self._guardar_productos(df, mapeo_aplicado)
+        logger.info(f"Encabezados encontrados ({len(encabezados_raw)}): {encabezados_raw[:10]}...")
+
+        # Construir mapeo índice → campo modelo
+        mapeo_indices: dict[int, str] = {}
+        for idx, enc in enumerate(encabezados_raw):
+            enc_norm = _normalizar_encabezado(enc)
+            if enc_norm in MAPEO_COLUMNAS:
+                campo = MAPEO_COLUMNAS[enc_norm]
+                mapeo_indices[idx] = campo
+                logger.debug(f"  ✓ Col {idx+1} '{enc}' → {campo}")
+            elif enc is not None:
+                logger.warning(f"  ✗ Col {idx+1} sin mapeo: '{enc}' (normalizada: '{enc_norm}')")
+
+        logger.info(f"Columnas mapeadas: {len(mapeo_indices)} de {len(encabezados_raw)}")
+
+        # Cargar productos
+        cantidad = await self._guardar_productos_openpyxl(ws, mapeo_indices, fila_enc)
+        wb.close()
         return cantidad
 
-    def _mapear_columnas(self, df: pd.DataFrame) -> dict[str, str]:
-        """
-        Mapea los nombres de columnas del Excel a los campos del modelo.
-        Usa normalización para tolerar variaciones en nombres.
-        
-        PUNTO DE DEBUGGING: Si una columna del Excel no se mapea correctamente,
-        ejecuta el sistema y revisa los logs "Columna no mapeada: ...".
-        Luego agrega el nombre normalizado a MAPEO_COLUMNAS arriba.
-        
-        Returns:
-            Dict {nombre_columna_original: campo_modelo}
-        """
-        mapeo_resultado = {}
-
-        for col_original in df.columns:
-            col_normalizada = _normalizar_encabezado(str(col_original))
-
-            if col_normalizada in MAPEO_COLUMNAS:
-                campo_modelo = MAPEO_COLUMNAS[col_normalizada]
-                mapeo_resultado[col_original] = campo_modelo
-                logger.debug(f"  ✓ '{col_original}' → {campo_modelo}")
-            else:
-                # PUNTO DE DEBUGGING: Estas columnas no se están usando
-                logger.warning(f"  ✗ Columna no mapeada: '{col_original}' (normalizada: '{col_normalizada}')")
-
-        return mapeo_resultado
-
-    async def _guardar_productos(
+    async def _guardar_productos_openpyxl(
         self,
-        df: pd.DataFrame,
-        mapeo: dict[str, str]
+        ws,
+        mapeo_indices: dict[int, str],
+        fila_encabezado: int,
     ) -> int:
-        """
-        Guarda los productos en SQLite.
-        Limpia la tabla antes de cargar (recarga completa).
-        """
         async with AsyncSessionLocal() as db:
-            # Limpiar tabla de productos antes de cargar
             await db.execute(text("DELETE FROM productos"))
             await db.commit()
-            logger.info("Tabla de productos limpiada. Iniciando carga...")
+            logger.info("Tabla limpiada. Iniciando carga...")
 
-            productos_cargados = 0
-            productos_omitidos = 0
+            cargados = 0
+            omitidos = 0
+            fila_num = fila_encabezado  # contador para referencia
 
-            for idx, fila in df.iterrows():
-                # Omitir filas completamente vacías
-                if fila.dropna().empty:
+            for row in ws.iter_rows(min_row=fila_encabezado + 1, values_only=True):
+                fila_num += 1
+
+                # Omitir filas vacías
+                if all(v is None for v in row):
                     continue
 
-                producto = Producto()
-                producto.fila_excel = int(idx) + settings.EXCEL_FILA_ENCABEZADO + 2  # 1-indexed para debugging
+                p = Producto()
+                p.fila_excel = fila_num
 
-                # Mapear cada columna al campo correspondiente
-                for col_excel, campo_modelo in mapeo.items():
-                    valor_raw = fila.get(col_excel)
+                for idx, campo in mapeo_indices.items():
+                    if idx >= len(row):
+                        continue
+                    valor = row[idx]
 
-                    # Determinar si el campo es numérico
-                    campos_numericos = {
-                        "precio_lista", "promocion", "costo_mas_iva", "iva",
-                        "precio_sugerido_con_iva", "precio_publico_neto",
-                        "precio_20", "precio_85", "precio_12",
-                        "precio_publico", "precio_publico_5_desc",
-                    }
-
-                    if campo_modelo in campos_numericos:
-                        setattr(producto, campo_modelo, _convertir_numero(valor_raw))
+                    if campo in CAMPOS_NUMERICOS:
+                        setattr(p, campo, _convertir_numero(valor))
                     else:
-                        # Campo de texto
-                        if valor_raw is not None and str(valor_raw).strip() not in ("", "nan", "None"):
-                            setattr(producto, campo_modelo, str(valor_raw).strip())
+                        # Campo de texto — ignorar fórmulas no calculadas
+                        if valor is None:
+                            setattr(p, campo, None)
+                        elif isinstance(valor, str) and valor.startswith("="):
+                            setattr(p, campo, None)
+                        elif isinstance(valor, str) and valor.strip() in ("", "nan", "None"):
+                            setattr(p, campo, None)
                         else:
-                            setattr(producto, campo_modelo, None)
+                            setattr(p, campo, str(valor).strip())
 
-                # Verificar que tenga al menos nombre o descripción
-                if not producto.producto and not producto.descripcion:
-                    productos_omitidos += 1
+                # Requiere al menos nombre o descripción
+                if not p.producto and not p.descripcion:
+                    omitidos += 1
                     continue
 
-                # Generar texto de búsqueda normalizado
-                producto.texto_busqueda = _normalizar_texto_busqueda(producto)
+                p.texto_busqueda = _normalizar_texto_busqueda(p)
+                db.add(p)
+                cargados += 1
 
-                db.add(producto)
-                productos_cargados += 1
-
-                # Commit cada 500 registros para no saturar memoria
-                if productos_cargados % 500 == 0:
+                if cargados % 500 == 0:
                     await db.commit()
-                    logger.info(f"  ... {productos_cargados} productos cargados")
+                    logger.info(f"  ... {cargados} productos cargados")
 
             await db.commit()
-            logger.info(
-                f"Carga completa: {productos_cargados} productos guardados, "
-                f"{productos_omitidos} filas omitidas."
-            )
-            return productos_cargados
+            logger.info(f"Carga completa: {cargados} productos, {omitidos} omitidos.")
+            return cargados
 
     async def obtener_total_productos(self) -> int:
-        """Retorna el número total de productos en el catálogo."""
         from sqlalchemy import select, func
         async with AsyncSessionLocal() as db:
-            resultado = await db.execute(select(func.count(Producto.id)))
-            return resultado.scalar() or 0
+            r = await db.execute(select(func.count(Producto.id)))
+            return r.scalar() or 0
