@@ -69,18 +69,33 @@ def iniciar_backend():
     """Inicia el servidor FastAPI con uvicorn."""
     print("🚀 Iniciando backend FastAPI en http://localhost:8000 ...")
 
-    # Cambiar al directorio del backend para que .env y las rutas relativas funcionen
+    # Detectar si hay entorno virtual activo en backend/venv
+    venv_python = BACKEND_DIR / "venv" / "bin" / "python"
+    venv_python_win = BACKEND_DIR / "venv" / "Scripts" / "python.exe"
+
+    if venv_python.exists():
+        python_cmd = str(venv_python)
+        print(f"   Usando virtualenv: {python_cmd}")
+    elif venv_python_win.exists():
+        python_cmd = str(venv_python_win)
+        print(f"   Usando virtualenv (Windows): {python_cmd}")
+    else:
+        python_cmd = sys.executable
+        print(f"   Usando Python del sistema: {python_cmd}")
+
+    kwargs = {"cwd": str(BACKEND_DIR)}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     proceso = subprocess.Popen(
         [
-            sys.executable, "-m", "uvicorn",
+            python_cmd, "-m", "uvicorn",
             "app.main:app",
             "--host", "0.0.0.0",
             "--port", "8000",
-            "--reload",   # Recarga automática al cambiar código (desarrollo)
+            "--reload",
         ],
-        cwd=str(BACKEND_DIR),
-        # En Windows, CREATE_NEW_PROCESS_GROUP permite terminar el proceso limpiamente
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        **kwargs,
     )
     return proceso
 
@@ -91,11 +106,11 @@ def iniciar_frontend():
 
     npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
 
-    proceso = subprocess.Popen(
-        [npm_cmd, "run", "dev"],
-        cwd=str(FRONTEND_DIR),
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-    )
+    kwargs = {"cwd": str(FRONTEND_DIR)}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    proceso = subprocess.Popen([npm_cmd, "run", "dev"], **kwargs)
     return proceso
 
 
@@ -145,14 +160,18 @@ def main():
 
     except KeyboardInterrupt:
         print("\n\n🛑 Deteniendo sistema...")
+        import signal as _signal
         for proceso in procesos:
             try:
                 if os.name == "nt":
-                    proceso.send_signal(subprocess.signal.CTRL_BREAK_EVENT)
+                    proceso.send_signal(_signal.CTRL_BREAK_EVENT)
                 else:
                     proceso.terminate()
             except Exception:
-                proceso.kill()
+                try:
+                    proceso.kill()
+                except Exception:
+                    pass
         print("✅ Sistema detenido correctamente.\n")
 
 
