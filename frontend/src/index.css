@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base global ─────────────────────────────────────────────────────────────── */
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-surface text-text-primary font-sans;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* Scrollbar personalizada estilo GitHub dark */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #161B22;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #30363D;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #484F58;
+  }
+
+  /* Selección de texto */
+  ::selection {
+    background: rgba(88, 166, 255, 0.25);
+    color: #E6EDF3;
+  }
+}
+
+/* ── Componentes reutilizables ───────────────────────────────────────────────── */
+@layer components {
+  /* Input estilo terminal oscuro */
+  .input-terminal {
+    @apply bg-surface-2 border border-surface-3 rounded-lg text-text-primary
+           placeholder-text-muted font-mono text-sm
+           focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
+           transition-all duration-200;
+  }
+
+  /* Botón primario */
+  .btn-primary {
+    @apply bg-accent hover:bg-accent-glow text-white font-mono text-sm font-medium
+           px-4 py-2 rounded-lg transition-all duration-200
+           disabled:opacity-40 disabled:cursor-not-allowed
+           focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  /* Botón secundario */
+  .btn-secondary {
+    @apply bg-surface-2 hover:bg-surface-3 text-text-secondary hover:text-text-primary
+           border border-surface-3 font-mono text-sm font-medium
+           px-4 py-2 rounded-lg transition-all duration-200
+           focus:outline-none focus:ring-1 focus:ring-surface-3;
+  }
+
+  /* Card / panel oscuro */
+  .card-dark {
+    @apply bg-surface-1 border border-surface-3 rounded-xl;
+  }
+
+  /* Badge de estado */
+  .badge-green {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-mono
+           bg-warn-green-bg text-warn-green border border-warn-green/20;
+  }
+
+  .badge-yellow {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-mono
+           bg-warn-yellow-bg text-warn-yellow border border-warn-yellow/20;
+  }
+
+  .badge-red {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-mono
+           bg-warn-red-bg text-warn-red border border-warn-red/20;
+  }
+
+  /* Etiqueta de código pequeña */
+  .code-tag {
+    @apply font-mono text-xs bg-surface-2 text-text-secondary px-1.5 py-0.5 rounded;
+  }
+}
+
+/* ── Animaciones globales ────────────────────────────────────────────────────── */
+@layer utilities {
+  /* Cursor de terminal parpadeante */
+  .cursor-blink::after {
+    content: '▋';
+    @apply text-accent animate-blink ml-0.5;
+  }
+
+  /* Sombra sutil de neón azul */
+  .glow-blue {
+    box-shadow: 0 0 12px rgba(88, 166, 255, 0.15);
+  }
+
+  /* Línea divisora estilo código */
+  .divider-code {
+    @apply border-t border-surface-3 my-4;
+  }
+}

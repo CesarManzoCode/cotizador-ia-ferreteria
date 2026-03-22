@@ -1,0 +1,26 @@
+# ── Framework principal ────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# ── Base de datos ──────────────────────────────────────────────────────────────
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+
+# ── Validación y configuración ─────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# ── HTTP client (para llamadas a Groq) ─────────────────────────────────────────
+httpx==0.28.1
+
+# ── Excel: lectura y escritura ─────────────────────────────────────────────────
+pandas==2.2.3
+openpyxl==3.1.5
+xlrd==2.0.1
+
+# ── Matching difuso ────────────────────────────────────────────────────────────
+rapidfuzz==3.10.1
+
+# ── Utilidades ─────────────────────────────────────────────────────────────────
+python-multipart==0.0.20
+python-dotenv==1.0.1
