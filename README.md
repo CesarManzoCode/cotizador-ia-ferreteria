@@ -1,5 +1,7 @@
 # 🤖 Cotizador IA — Sistema de Cotizaciones Asistidas por IA
 
+> This repository is retained as part of the hardware-store product line's development history. It is not the current implementation.
+
 Sistema local para generar cotizaciones a partir de texto libre usando IA (Groq) y una lista de precios en Excel.
 
 ---
